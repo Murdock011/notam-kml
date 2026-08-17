@@ -1,0 +1,39 @@
+name: Daily NOTAM to KML
+
+on:
+  schedule:
+    # Runs every day at 06:00 UTC (08:00 SAST)
+    - cron: '0 6 * * *'
+  workflow_dispatch:   # Allows you to run it manually
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run the script
+        env:
+          # Optional – only needed if you want to upload to Google Drive
+          GOOGLE_SERVICE_ACCOUNT: ${{ secrets.GOOGLE_SERVICE_ACCOUNT }}
+        run: |
+          python notam_to_kml.py
+
+      - name: Upload KML as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: notams-kml
+          path: notams.kml
+          retention-days: 7
