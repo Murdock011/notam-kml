@@ -335,27 +335,59 @@ def create_kml(notams: List[Dict], output_path: str):
 # Main
 # ------------------------------------------------------------------
 def main():
-    # 1. Download latest PDF
-    download_pdf()
+    try:
+        print("=== Starting NOTAM to KML ===")
+        
+        # 1. Download
+        print("Downloading PDF...")
+        download_pdf()
+        
+        if not Path(PDF_FILE).exists():
+            print("ERROR: PDF file was not downloaded!")
+            return
 
-    # 2. Extract NOTAM blocks
-    blocks = load_notams_from_pdf(PDF_FILE)
+        # 2. Extract
+        print("Extracting NOTAMs from PDF...")
+        blocks = load_notams_from_pdf(PDF_FILE)
+        print(f"Found {len(blocks)} raw blocks")
 
-    # 3. Parse them
-    parsed = []
-    for block in blocks:
-        n = parse_single_notam(block)
-        if n:
-            parsed.append(n)
+        if len(blocks) == 0:
+            print("ERROR: No NOTAM blocks found in the PDF.")
+            return
 
-    if not parsed:
-        print("No usable NOTAMs found.")
-        return
+        # 3. Parse
+        parsed = []
+        for i, block in enumerate(blocks):
+            try:
+                n = parse_single_notam(block)
+                if n:
+                    parsed.append(n)
+            except Exception as e:
+                print(f"Warning: Failed to parse block {i}: {e}")
 
-    print(f"Successfully parsed {len(parsed)} NOTAMs")
+        print(f"Successfully parsed {len(parsed)} NOTAMs")
 
-    # 4. Generate KML
-    create_kml(parsed, OUTPUT_KML)
+        if not parsed:
+            print("ERROR: No usable NOTAMs after parsing.")
+            return
+
+        # 4. Generate KML
+        print("Generating KML...")
+        create_kml(parsed, OUTPUT_KML)
+
+        if Path(OUTPUT_KML).exists():
+            print(f"SUCCESS: {OUTPUT_KML} created ({Path(OUTPUT_KML).stat().st_size} bytes)")
+        else:
+            print("ERROR: KML file was not created!")
+
+    except Exception as e:
+        print(f"FATAL ERROR: {e}")
+        import traceback
+        traceback.print_exc()
+
+
+if __name__ == "__main__":
+    main()
 
 
 if __name__ == "__main__":
