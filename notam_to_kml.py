@@ -30,6 +30,29 @@ except ImportError:
 PDF_URL = "https://caasanwebsitestorage.blob.core.windows.net/notam-summaries-and-pib/SUMMARY.pdf"
 PDF_FILE = "notam.pdf"
 OUTPUT_KML = "notams.kml"
+
+# Distance filter (set FILTER_ICAO = None to disable and include all NOTAMs)
+# Example: 50 NM around FASD (Saldanha / Vredenburg)
+FILTER_ICAO = "FASD"          # ICAO code, or None for no filter
+FILTER_RADIUS_NM = 50.0       # radius in nautical miles
+
+# Built-in SA aerodrome positions (lat, lon). Extend or load airports.csv as needed.
+AIRPORTS = {
+    "FASD": (-32.964066, 17.969331),   # Saldanha / Vredenburg
+    "FALW": (-32.968900, 18.160300),   # Langebaanweg
+    "FACT": (-33.971500, 18.602100),   # Cape Town Intl
+    "FAJS": (-26.139200, 28.246000),   # OR Tambo (legacy code sometimes seen)
+    "FAOR": (-26.139200, 28.246000),   # OR Tambo
+    "FALA": (-25.938500, 27.925800),   # Lanseria
+    "FAGG": (-34.005600, 22.375800),   # George
+    "FAPE": (-33.984900, 25.617300),   # Port Elizabeth / Gqeberha
+    "FADN": (-29.970300, 30.950500),   # Durban / King Shaka area (Virginia nearby)
+    "FALE": (-29.614400, 31.119700),   # King Shaka
+    "FAUP": (-28.400600, 21.260300),   # Upington
+    "FABL": (-29.092700, 26.302400),   # Bloemfontein
+    "FAPP": (-23.845300, 29.458700),   # Polokwane
+    "FAKM": (-28.805000, 24.765000),   # Kimberley
+}
 # ------------------------------------------------------------------
 # Coordinate parsing
 # ------------------------------------------------------------------
@@ -117,6 +140,55 @@ def close_polygon(coords: List[Tuple[float, float]]) -> List[Tuple[float, float]
     if coords[0] != coords[-1]:
         return coords + [coords[0]]
     return coords
+
+
+def haversine_nm(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Great-circle distance in nautical miles."""
+    R_NM = 3440.065  # Earth radius in NM
+    lat1, lon1, lat2, lon2 = map(math.radians, [lat1, lon1, lat2, lon2])
+    dlat = lat2 - lat1
+    dlon = lon2 - lon1
+    a = math.sin(dlat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+    return R_NM * c
+
+
+def notam_center(n: Dict) -> Optional[Tuple[float, float]]:
+    """Best available centre (lat, lon) for a parsed NOTAM."""
+    if n.get("has_polygon") and n.get("polygon_coords"):
+        clon, clat = polygon_centroid(n["polygon_coords"])
+        return clat, clon
+    if n.get("single_point"):
+        lon, lat = n["single_point"]
+        return lat, lon
+    q = n.get("q_geo")
+    if q:
+        return q["lat"], q["lon"]
+    return None
+
+
+def filter_by_distance(
+    notams: List[Dict],
+    center_lat: float,
+    center_lon: float,
+    radius_nm: float,
+    icao: Optional[str] = None,
+) -> List[Dict]:
+    """Keep NOTAMs whose geometry centre is within radius_nm of the centre,
+    or whose A) location mentions the ICAO code."""
+    kept = []
+    for n in notams:
+        # Always keep if A) explicitly lists this aerodrome
+        if icao and icao.upper() in (n.get("location") or "").upper():
+            kept.append(n)
+            continue
+        centre = notam_center(n)
+        if centre is None:
+            continue
+        lat, lon = centre
+        if haversine_nm(center_lat, center_lon, lat, lon) <= radius_nm:
+            kept.append(n)
+    return kept
 # ------------------------------------------------------------------
 # PDF download + parsing
 # ------------------------------------------------------------------
@@ -134,55 +206,48 @@ def download_pdf():
 def load_notams_from_pdf(filename: str) -> List[str]:
     """Extract raw NOTAM blocks from the CAA SUMMARY.pdf.
 
-    Robust against pypdf version / CI differences in spacing and line breaks.
+    Uses the proven split-on-NOTAMx approach (same idea as the working
+    notamAPI class): CAA extracts IDs glued to the type, e.g. A2035/18NOTAMN.
+    We split on NOTAMN/R/C, then prepend the ID that sits just before the marker.
     """
     reader = PdfReader(filename)
     text = ""
-    for page in reader.pages:
+    # Page 0 is the cover / header – content starts on page 1 (0-based index 1)
+    for page in reader.pages[1:]:
         text += (page.extract_text() or "") + "\n"
 
-    # Normalise whitespace a little so regexes are less fragile
-    # (keep newlines – they help section boundaries)
-    text = re.sub(r"[ \t]+", " ", text)
+    # Split on the type marker, keeping the marker
+    # e.g. "...A2035/18" + "NOTAMN" + "Q) FAJA/..."
+    parts = re.split(r"(NOTAM[NRC])", text, flags=re.IGNORECASE)
 
-    # Primary pattern: ID + optional whitespace/newlines + NOTAMx
-    # Examples seen: A2035/18NOTAMN , A2035/18 NOTAMN , A2035/18\nNOTAMN
-    id_pat = r"[A-Z]\d{4}/\d{2}"
-    notam_pat = r"NOTAM[NRC]?"
-
-    # Lookahead-only split (no capturing group → no duplicates)
-    split_re = re.compile(
-        rf"(?={id_pat}\s*{notam_pat})",
-        re.IGNORECASE | re.MULTILINE,
-    )
-    raw_blocks = split_re.split(text)
-
-    blocks = []
-    for b in raw_blocks:
-        b = b.strip()
-        if not b:
-            continue
-        # Accept block if it starts with a NOTAM id (with or without the word NOTAM)
-        if re.match(rf"^{id_pat}\s*{notam_pat}", b, re.IGNORECASE):
-            blocks.append(b)
-        elif re.match(rf"^{id_pat}\b", b):
-            # Fallback: some extractors put the ID on its own line
-            blocks.append(b)
+    blocks: List[str] = []
+    # parts is [preamble, marker, body, marker, body, ...]
+    for i in range(1, len(parts) - 1, 2):
+        marker = parts[i]          # "NOTAMN" / "NOTAMR" / "NOTAMC"
+        body = parts[i + 1]
+        prev = parts[i - 1]
+        # ID is the last A####/## (or similar) sitting just before the marker
+        m = re.search(r"([A-Z]\d{4}/\d{2})\s*$", prev.strip()[-20:])
+        if not m:
+            # Fallback: search a bit further back
+            m = re.search(r"([A-Z]\d{4}/\d{2})\s*$", prev[-40:])
+        if m:
+            notam_id = m.group(1)
+            block = f"{notam_id}{marker}{body}"
+            blocks.append(block.strip())
 
     print(f"Extracted {len(blocks)} NOTAM blocks from PDF")
 
-    # Diagnostic help for CI when nothing is found
     if len(blocks) == 0:
         print("DEBUG: No blocks matched. Sample of extracted text (first 2000 chars):")
         print(repr(text[:2000]))
         print("---")
-        ids_found = re.findall(rf"{id_pat}", text)
+        for marker in ("NOTAMN", "NOTAMR", "NOTAMC"):
+            print(f"DEBUG: count of {marker} = {text.count(marker)}")
+        ids_found = re.findall(r"[A-Z]\d{4}/\d{2}", text)
         print(f"DEBUG: Raw ID-like tokens found: {len(ids_found)}")
         if ids_found:
             print("DEBUG: First 10 IDs:", ids_found[:10])
-        glued = re.findall(rf"{id_pat}{notam_pat}", text, re.IGNORECASE)
-        spaced = re.findall(rf"{id_pat}\s+{notam_pat}", text, re.IGNORECASE)
-        print(f"DEBUG: glued NOTAM count={len(glued)}, spaced NOTAM count={len(spaced)}")
 
     return blocks
 # ------------------------------------------------------------------
@@ -256,8 +321,19 @@ def parse_single_notam(text: str) -> Optional[Dict]:
 # ------------------------------------------------------------------
 # KML generation
 # ------------------------------------------------------------------
-def create_kml(notams: List[Dict], output_path: str):
-    kml = simplekml.Kml(name="NOTAM Locations")
+def create_kml(
+    notams: List[Dict],
+    output_path: str,
+    filter_icao: Optional[str] = None,
+    filter_radius_nm: Optional[float] = None,
+    center_lat: Optional[float] = None,
+    center_lon: Optional[float] = None,
+):
+    name = "NOTAM Locations"
+    if filter_icao and filter_radius_nm:
+        name = f"NOTAMs within {filter_radius_nm:.0f} NM of {filter_icao}"
+    kml = simplekml.Kml(name=name)
+
     # Styles
     red_point = simplekml.Style()
     red_point.iconstyle.icon.href = "http://maps.google.com/mapfiles/kml/paddle/red-circle.png"
@@ -273,6 +349,31 @@ def create_kml(notams: List[Dict], output_path: str):
     blue_poly.linestyle.color = simplekml.Color.blue
     blue_poly.linestyle.width = 2
     blue_poly.polystyle.color = simplekml.Color.changealphaint(90, simplekml.Color.blue)
+
+    # Draw filter centre + radius circle when filtering
+    if filter_icao and center_lat is not None and center_lon is not None and filter_radius_nm:
+        center_folder = kml.newfolder(name=f"Filter: {filter_icao} {filter_radius_nm:.0f} NM")
+        green_point = simplekml.Style()
+        green_point.iconstyle.icon.href = "http://maps.google.com/mapfiles/kml/paddle/grn-circle.png"
+        green_point.iconstyle.scale = 1.3
+        p = center_folder.newpoint(
+            name=filter_icao,
+            description=f"Filter centre: {filter_icao}<br>Radius: {filter_radius_nm} NM",
+            coords=[(center_lon, center_lat)],
+        )
+        p.style = green_point
+        green_poly = simplekml.Style()
+        green_poly.linestyle.color = simplekml.Color.changealphaint(180, simplekml.Color.green)
+        green_poly.linestyle.width = 2
+        green_poly.polystyle.color = simplekml.Color.changealphaint(40, simplekml.Color.green)
+        circle_coords = create_circle(center_lat, center_lon, filter_radius_nm, points=64)
+        pol = center_folder.newpolygon(
+            name=f"{filter_radius_nm:.0f} NM radius",
+            description=f"Filter radius around {filter_icao}",
+        )
+        pol.outerboundaryis = circle_coords
+        pol.style = green_poly
+
     for idx, n in enumerate(notams, start=1):
         height = n.get("height_ft")
         is_low = (height is not None and height < 1000)
@@ -325,16 +426,50 @@ def create_kml(notams: List[Dict], output_path: str):
 # Main
 # ------------------------------------------------------------------
 def main():
+    import argparse
+    parser = argparse.ArgumentParser(description="NOTAM → KML generator for South Africa")
+    parser.add_argument(
+        "--icao",
+        default=FILTER_ICAO,
+        help="Filter centre ICAO (e.g. FASD). Omit or set empty for all NOTAMs.",
+    )
+    parser.add_argument(
+        "--radius",
+        type=float,
+        default=FILTER_RADIUS_NM,
+        help="Filter radius in nautical miles (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--output",
+        default=OUTPUT_KML,
+        help="Output KML path (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--no-filter",
+        action="store_true",
+        help="Disable distance filter and include all NOTAMs",
+    )
+    args = parser.parse_args()
+
+    filter_icao = None if args.no_filter else (args.icao.upper().strip() if args.icao else None)
+    filter_radius = args.radius
+    output_path = args.output
+
     try:
         print("=== Starting NOTAM to KML ===")
-       
+        if filter_icao:
+            print(f"Filter: {filter_radius:.0f} NM around {filter_icao}")
+        else:
+            print("Filter: none (all NOTAMs)")
+
         # 1. Download
         print("Downloading PDF...")
         download_pdf()
-       
+
         if not Path(PDF_FILE).exists():
             print("ERROR: PDF file was not downloaded!")
             return
+
         # 2. Extract
         print("Extracting NOTAMs from PDF...")
         blocks = load_notams_from_pdf(PDF_FILE)
@@ -342,6 +477,7 @@ def main():
         if len(blocks) == 0:
             print("ERROR: No NOTAM blocks found in the PDF.")
             return
+
         # 3. Parse
         parsed = []
         for i, block in enumerate(blocks):
@@ -355,16 +491,41 @@ def main():
         if not parsed:
             print("ERROR: No usable NOTAMs after parsing.")
             return
-        # 4. Generate KML
+
+        # 4. Optional distance filter
+        center_lat = center_lon = None
+        if filter_icao:
+            if filter_icao not in AIRPORTS:
+                print(f"ERROR: Unknown ICAO '{filter_icao}'. Add it to AIRPORTS dict or use --no-filter.")
+                print("Known:", ", ".join(sorted(AIRPORTS.keys())))
+                return
+            center_lat, center_lon = AIRPORTS[filter_icao]
+            before = len(parsed)
+            parsed = filter_by_distance(parsed, center_lat, center_lon, filter_radius, filter_icao)
+            print(f"Distance filter: {before} → {len(parsed)} NOTAMs within {filter_radius:.0f} NM of {filter_icao}")
+            if not parsed:
+                print("WARNING: No NOTAMs within the filter radius.")
+                # still write an empty-ish KML with just the centre circle
+
+        # 5. Generate KML
         print("Generating KML...")
-        create_kml(parsed, OUTPUT_KML)
-        if Path(OUTPUT_KML).exists():
-            print(f"SUCCESS: {OUTPUT_KML} created ({Path(OUTPUT_KML).stat().st_size} bytes)")
+        create_kml(
+            parsed,
+            output_path,
+            filter_icao=filter_icao,
+            filter_radius_nm=filter_radius if filter_icao else None,
+            center_lat=center_lat,
+            center_lon=center_lon,
+        )
+        if Path(output_path).exists():
+            print(f"SUCCESS: {output_path} created ({Path(output_path).stat().st_size} bytes)")
         else:
             print("ERROR: KML file was not created!")
     except Exception as e:
         print(f"FATAL ERROR: {e}")
         import traceback
         traceback.print_exc()
+
+
 if __name__ == "__main__":
     main()
