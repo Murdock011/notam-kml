@@ -122,18 +122,68 @@ def close_polygon(coords: List[Tuple[float, float]]) -> List[Tuple[float, float]
 # ------------------------------------------------------------------
 def download_pdf():
     print("Downloading latest NOTAM PDF...")
-    urllib.request.urlretrieve(PDF_URL, PDF_FILE)
-    print("Download complete.")
+    # Use a real User-Agent – some environments / proxies block the default urllib one
+    req = urllib.request.Request(
+        PDF_URL,
+        headers={"User-Agent": "Mozilla/5.0 (compatible; NOTAM-KML-Generator/1.0)"},
+    )
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        data = resp.read()
+    Path(PDF_FILE).write_bytes(data)
+    print(f"Download complete. ({len(data)} bytes)")
 def load_notams_from_pdf(filename: str) -> List[str]:
-    """Extract raw NOTAM blocks from the CAA SUMMARY.pdf"""
+    """Extract raw NOTAM blocks from the CAA SUMMARY.pdf.
+
+    Robust against pypdf version / CI differences in spacing and line breaks.
+    """
     reader = PdfReader(filename)
     text = ""
     for page in reader.pages:
         text += (page.extract_text() or "") + "\n"
-    # Split on NOTAM identifiers (Axxxx/26NOTAMN, etc. — often no space)
-    blocks = re.split(r"(?=(?:[A-Z]\d{4}/\d{2}\s*NOTAM[NRC]?))", text)
-    blocks = [b.strip() for b in blocks if re.match(r"[A-Z]\d{4}/\d{2}\s*NOTAM", b)]
+
+    # Normalise whitespace a little so regexes are less fragile
+    # (keep newlines – they help section boundaries)
+    text = re.sub(r"[ \t]+", " ", text)
+
+    # Primary pattern: ID + optional whitespace/newlines + NOTAMx
+    # Examples seen: A2035/18NOTAMN , A2035/18 NOTAMN , A2035/18\nNOTAMN
+    id_pat = r"[A-Z]\d{4}/\d{2}"
+    notam_pat = r"NOTAM[NRC]?"
+
+    # Lookahead-only split (no capturing group → no duplicates)
+    split_re = re.compile(
+        rf"(?={id_pat}\s*{notam_pat})",
+        re.IGNORECASE | re.MULTILINE,
+    )
+    raw_blocks = split_re.split(text)
+
+    blocks = []
+    for b in raw_blocks:
+        b = b.strip()
+        if not b:
+            continue
+        # Accept block if it starts with a NOTAM id (with or without the word NOTAM)
+        if re.match(rf"^{id_pat}\s*{notam_pat}", b, re.IGNORECASE):
+            blocks.append(b)
+        elif re.match(rf"^{id_pat}\b", b):
+            # Fallback: some extractors put the ID on its own line
+            blocks.append(b)
+
     print(f"Extracted {len(blocks)} NOTAM blocks from PDF")
+
+    # Diagnostic help for CI when nothing is found
+    if len(blocks) == 0:
+        print("DEBUG: No blocks matched. Sample of extracted text (first 2000 chars):")
+        print(repr(text[:2000]))
+        print("---")
+        ids_found = re.findall(rf"{id_pat}", text)
+        print(f"DEBUG: Raw ID-like tokens found: {len(ids_found)}")
+        if ids_found:
+            print("DEBUG: First 10 IDs:", ids_found[:10])
+        glued = re.findall(rf"{id_pat}{notam_pat}", text, re.IGNORECASE)
+        spaced = re.findall(rf"{id_pat}\s+{notam_pat}", text, re.IGNORECASE)
+        print(f"DEBUG: glued NOTAM count={len(glued)}, spaced NOTAM count={len(spaced)}")
+
     return blocks
 # ------------------------------------------------------------------
 # Single NOTAM parser
@@ -163,7 +213,9 @@ def parse_single_notam(text: str) -> Optional[Dict]:
     text = text.strip()
     if not text:
         return None
-    id_match = re.search(r"([A-Z]\d{4}/\d{2})\s*NOTAM[NRC]?", text)
+    id_match = re.search(r"([A-Z]\d{4}/\d{2})\s*NOTAM[NRC]?", text, re.IGNORECASE)
+    if not id_match:
+        id_match = re.search(r"([A-Z]\d{4}/\d{2})\b", text)
     notam_id = id_match.group(1) if id_match else "UNKNOWN"
     q_match = re.search(r"Q\)\s*(.+?)(?=\n[A-Z]\)|\Z)", text, re.DOTALL)
     qline = q_match.group(1).strip() if q_match else ""
