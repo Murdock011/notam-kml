@@ -33,7 +33,7 @@ OUTPUT_KML = "notams.kml"
 
 # Distance filter (set FILTER_ICAO = None to disable and include all NOTAMs)
 # Example: 50 NM around FASD (Saldanha / Vredenburg)
-FILTER_ICAO = "FALW"          # ICAO code, or None for no filter
+FILTER_ICAO = "FASD"          # ICAO code, or None for no filter
 FILTER_RADIUS_NM = 50.0       # radius in nautical miles
 
 # Built-in SA aerodrome positions (lat, lon). Extend or load airports.csv as needed.
