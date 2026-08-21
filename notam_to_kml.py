@@ -9,6 +9,7 @@ NOTAM → KML generator for South Africa
   - Circle only when no polygon and radius > 0
   - Colour by G) height (<1000 ft = red, ≥1000 ft = blue)
 """
+import csv
 import re
 import math
 import urllib.request
@@ -36,23 +37,29 @@ OUTPUT_KML = "notams.kml"
 FILTER_ICAO = "FASD"          # ICAO code, or None for no filter
 FILTER_RADIUS_NM = 50.0       # radius in nautical miles
 
-# Built-in SA aerodrome positions (lat, lon). Extend or load airports.csv as needed.
-AIRPORTS = {
-    "FASD": (-32.964066, 17.969331),   # Saldanha / Vredenburg
-    "FALW": (-32.968900, 18.160300),   # Langebaanweg
-    "FACT": (-33.971500, 18.602100),   # Cape Town Intl
-    "FAJS": (-26.139200, 28.246000),   # OR Tambo (legacy code sometimes seen)
-    "FAOR": (-26.139200, 28.246000),   # OR Tambo
-    "FALA": (-25.938500, 27.925800),   # Lanseria
-    "FAGG": (-34.005600, 22.375800),   # George
-    "FAPE": (-33.984900, 25.617300),   # Port Elizabeth / Gqeberha
-    "FADN": (-29.970300, 30.950500),   # Durban / King Shaka area (Virginia nearby)
-    "FALE": (-29.614400, 31.119700),   # King Shaka
-    "FAUP": (-28.400600, 21.260300),   # Upington
-    "FABL": (-29.092700, 26.302400),   # Bloemfontein
-    "FAPP": (-23.845300, 29.458700),   # Polokwane
-    "FAKM": (-28.805000, 24.765000),   # Kimberley
-}
+# SA aerodrome positions, loaded from airports.csv (icao,lat,lon,name).
+# Add a row there to support a new --icao filter centre; no code changes needed.
+AIRPORTS_FILE = "airports.csv"
+
+
+def load_airports(path: str = AIRPORTS_FILE) -> Dict[str, Tuple[float, float]]:
+    airports: Dict[str, Tuple[float, float]] = {}
+    csv_path = Path(path)
+    if not csv_path.exists():
+        return airports
+    with csv_path.open(newline="", encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            icao = (row.get("icao") or "").strip().upper()
+            if not icao:
+                continue
+            try:
+                airports[icao] = (float(row["lat"]), float(row["lon"]))
+            except (KeyError, ValueError):
+                print(f"Warning: skipping malformed airports.csv row: {row}")
+    return airports
+
+
+AIRPORTS = load_airports()
 # ------------------------------------------------------------------
 # Coordinate parsing
 # ------------------------------------------------------------------
@@ -496,7 +503,7 @@ def main():
         center_lat = center_lon = None
         if filter_icao:
             if filter_icao not in AIRPORTS:
-                print(f"ERROR: Unknown ICAO '{filter_icao}'. Add it to AIRPORTS dict or use --no-filter.")
+                print(f"ERROR: Unknown ICAO '{filter_icao}'. Add it to {AIRPORTS_FILE} or use --no-filter.")
                 print("Known:", ", ".join(sorted(AIRPORTS.keys())))
                 return
             center_lat, center_lon = AIRPORTS[filter_icao]
