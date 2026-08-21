@@ -6,6 +6,9 @@ on:
     - cron: '0 6 * * *'
   workflow_dispatch:   # Allows you to run it manually
 
+permissions:
+  contents: write   # needed to commit the refreshed docs/ data for GitHub Pages
+
 jobs:
   generate:
     runs-on: ubuntu-latest
@@ -34,3 +37,19 @@ jobs:
           name: notams-kml
           path: notams.kml
           retention-days: 7
+
+      - name: Update web map data
+        run: |
+          cp airports.csv docs/airports.csv
+
+      - name: Commit and push web map data
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add docs/notams.geojson docs/airports.csv
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "Update NOTAM web map data"
+            git push
+          fi

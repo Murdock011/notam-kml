@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>South Africa NOTAM Map</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+  integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
+<style>
+  html, body { height: 100%; margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif; }
+  #map { position: absolute; top: 56px; bottom: 0; left: 0; right: 0; }
+  #controls {
+    height: 56px; display: flex; align-items: center; gap: 10px;
+    padding: 0 12px; background: #1a2332; color: #fff; box-sizing: border-box;
+    flex-wrap: wrap;
+  }
+  #controls h1 { font-size: 15px; margin: 0 12px 0 0; white-space: nowrap; font-weight: 600; }
+  #controls label { font-size: 13px; opacity: 0.85; }
+  #controls select, #controls input {
+    font-size: 13px; padding: 4px 6px; border-radius: 4px; border: 1px solid #445;
+    background: #24304a; color: #fff;
+  }
+  #status { font-size: 12px; opacity: 0.7; margin-left: auto; white-space: nowrap; }
+  .legend {
+    position: absolute; bottom: 16px; right: 16px; z-index: 500;
+    background: #fff; padding: 8px 10px; border-radius: 6px; font-size: 12px;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.3); line-height: 1.6;
+  }
+  .legend span { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; }
+  .popup-text { white-space: pre-wrap; font-size: 12px; max-height: 200px; overflow-y: auto; }
+  .popup-title { font-weight: 600; margin-bottom: 4px; }
+</style>
+</head>
+<body>
+
+<div id="controls">
+  <h1>SA NOTAM Map</h1>
+  <label for="icao">Centre</label>
+  <select id="icao"><option value="">All NOTAMs (no filter)</option></select>
+  <label for="radius">Radius (NM)</label>
+  <input id="radius" type="number" value="50" min="1" max="2000" step="1" style="width: 70px;">
+  <span id="status">Loading…</span>
+</div>
+
+<div id="map"></div>
+<div class="legend">
+  <div><span style="background:#e63946;"></span>Below 1000 ft</div>
+  <div><span style="background:#3182ce;"></span>1000 ft and above / unknown</div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+  integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+<script>
+const RED = "#e63946";
+const BLUE = "#3182ce";
+const NM_TO_M = 1852;
+
+const map = L.map('map').setView([-29.0, 24.0], 5); // South Africa
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  attribution: '&copy; OpenStreetMap contributors',
+  maxZoom: 18,
+}).addTo(map);
+
+let layerGroup = L.layerGroup().addTo(map);
+let allFeatures = [];
+let airports = {}; // icao -> {lat, lon, name}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  }[c]));
+}
+
+function haversineNm(lat1, lon1, lat2, lon2) {
+  const R = 3440.065;
+  const toRad = d => d * Math.PI / 180;
+  const dLat = toRad(lat2 - lat1), dLon = toRad(lon2 - lon1);
+  const a = Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+function popupHtml(props) {
+  const height = props.height_ft;
+  const heightLine = height != null
+    ? `Upper limit: ${height} ft (${props.is_low ? 'RED' : 'BLUE'})`
+    : 'Upper limit: unknown (BLUE default)';
+  return `
+    <div class="popup-title">#${props.index} (${escapeHtml(props.id)})</div>
+    Location: ${escapeHtml(props.location)}<br>
+    Valid: ${escapeHtml(props.valid_from)} &rarr; ${escapeHtml(props.valid_to)}<br>
+    ${heightLine}<br><br>
+    <div class="popup-text">${escapeHtml(props.text)}</div>
+  `;
+}
+
+function drawFeature(f) {
+  const props = f.properties;
+  const color = props.is_low ? RED : BLUE;
+  const style = { color, weight: 2, fillColor: color, fillOpacity: 0.35 };
+
+  if (f.geometry.type === 'Polygon') {
+    const layer = L.geoJSON(f, { style });
+    layer.bindPopup(popupHtml(props));
+    layer.addTo(layerGroup);
+    if (props.centre_lat != null && props.centre_lon != null) {
+      L.circleMarker([props.centre_lat, props.centre_lon], {
+        radius: 4, color, fillColor: color, fillOpacity: 1, weight: 1,
+      }).bindPopup(popupHtml(props)).addTo(layerGroup);
+    }
+  } else if (f.geometry.type === 'Point') {
+    const [lon, lat] = f.geometry.coordinates;
+    L.circleMarker([lat, lon], {
+      radius: 6, color, fillColor: color, fillOpacity: 0.9, weight: 1,
+    }).bindPopup(popupHtml(props)).addTo(layerGroup);
+    if (props.radius_nm) {
+      L.circle([lat, lon], {
+        radius: props.radius_nm * NM_TO_M,
+        color, weight: 2, fillColor: color, fillOpacity: 0.15,
+      }).bindPopup(popupHtml(props)).addTo(layerGroup);
+    }
+  }
+}
+
+function applyFilter() {
+  const icao = document.getElementById('icao').value;
+  const radius = parseFloat(document.getElementById('radius').value) || 0;
+  layerGroup.clearLayers();
+
+  let shown = allFeatures;
+  if (icao && airports[icao]) {
+    const { lat: clat, lon: clon } = airports[icao];
+    shown = allFeatures.filter(f => {
+      const props = f.properties;
+      if ((props.location || '').toUpperCase().includes(icao)) return true;
+      if (props.centre_lat == null || props.centre_lon == null) return false;
+      return haversineNm(clat, clon, props.centre_lat, props.centre_lon) <= radius;
+    });
+  }
+  shown.forEach(drawFeature);
+  document.getElementById('status').textContent =
+    `${shown.length} of ${allFeatures.length} NOTAMs shown`;
+}
+
+function parseCsvLine(line) {
+  return line.split(',');
+}
+
+async function loadAirports() {
+  const res = await fetch('airports.csv', { cache: 'no-store' });
+  const text = await res.text();
+  const lines = text.trim().split('\n').slice(1); // skip header
+  const select = document.getElementById('icao');
+  const rows = lines.map(parseCsvLine)
+    .map(([icao, lat, lon, ...nameParts]) => ({
+      icao, lat: parseFloat(lat), lon: parseFloat(lon), name: nameParts.join(',').trim(),
+    }))
+    .sort((a, b) => a.icao.localeCompare(b.icao));
+  for (const r of rows) {
+    airports[r.icao] = { lat: r.lat, lon: r.lon };
+    const opt = document.createElement('option');
+    opt.value = r.icao;
+    opt.textContent = `${r.icao} — ${r.name}`;
+    select.appendChild(opt);
+  }
+}
+
+async function loadNotams() {
+  const res = await fetch('notams.geojson', { cache: 'no-store' });
+  const fc = await res.json();
+  allFeatures = fc.features || [];
+  const status = document.getElementById('status');
+  if (fc.generated_at) {
+    status.title = `Data generated: ${fc.generated_at}`;
+  }
+}
+
+async function init() {
+  await Promise.all([loadAirports(), loadNotams()]);
+  document.getElementById('icao').value = 'FASD';
+  document.getElementById('icao').addEventListener('change', applyFilter);
+  document.getElementById('radius').addEventListener('change', applyFilter);
+  document.getElementById('radius').addEventListener('input', applyFilter);
+  applyFilter();
+}
+
+init().catch(err => {
+  document.getElementById('status').textContent = 'Failed to load NOTAM data: ' + err.message;
+  console.error(err);
+});
+</script>
+</body>
+</html>
