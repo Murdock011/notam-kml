@@ -1,5 +1,2 @@
 pypdf
 simplekml
-requests
-google-api-python-client
-google-auth
