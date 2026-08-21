@@ -23,8 +23,9 @@ python notam_to_kml.py --icao FACT --radius 100 --output cape_town.kml
 python notam_to_kml.py --no-filter   # include every NOTAM in the PDF
 ```
 
-Airport ICAO codes available for `--icao` are listed in the `AIRPORTS` dict in
-[notam_to_kml.py](notam_to_kml.py); add more entries there as needed.
+Airport ICAO codes available for `--icao` are listed in
+[airports.csv](airports.csv) (`icao,lat,lon,name`). Add a row there to support
+a new filter centre — no code changes needed.
 
 ## Automation
 
