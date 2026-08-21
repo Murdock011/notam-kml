@@ -212,6 +212,21 @@ def download_pdf():
         data = resp.read()
     Path(PDF_FILE).write_bytes(data)
     print(f"Download complete. ({len(data)} bytes)")
+def extract_pdf_compiled_at(filename: str) -> Optional[str]:
+    """Read the CAA-stamped 'Date/Time DDMMMYY HHMM' off the PDF's cover page
+    (page 0) — this is when ATNS compiled the summary, not when we scraped
+    it. Returns an ISO 8601 UTC string, or None if the cover page format
+    changes and it can't be found."""
+    reader = PdfReader(filename)
+    cover_text = reader.pages[0].extract_text() or ""
+    m = re.search(r"Date/Time\s+(\d{2}[A-Z]{3}\d{2})\s+(\d{4})", cover_text)
+    if not m:
+        return None
+    try:
+        dt = datetime.strptime(f"{m.group(1)} {m.group(2)}", "%d%b%y %H%M")
+    except ValueError:
+        return None
+    return dt.replace(tzinfo=timezone.utc).isoformat(timespec="minutes")
 def load_notams_from_pdf(filename: str) -> List[str]:
     """Extract raw NOTAM blocks from the CAA SUMMARY.pdf.
 
@@ -470,7 +485,11 @@ def notam_geojson_feature(n: Dict, idx: int) -> Optional[Dict]:
     return {"type": "Feature", "properties": props, "geometry": geometry}
 
 
-def create_geojson(notams: List[Dict], output_path: str) -> None:
+def create_geojson(
+    notams: List[Dict],
+    output_path: str,
+    pdf_compiled_at: Optional[str] = None,
+) -> None:
     """Write ALL parsed NOTAMs (unfiltered) as GeoJSON for the static web map,
     which applies its own ICAO/radius filter client-side."""
     features = []
@@ -481,6 +500,7 @@ def create_geojson(notams: List[Dict], output_path: str) -> None:
     fc = {
         "type": "FeatureCollection",
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "pdf_compiled_at": pdf_compiled_at,
         "features": features,
     }
     out = Path(output_path)
@@ -571,7 +591,12 @@ def main():
         #    page can apply its own ICAO/radius filter client-side)
         if not args.no_geojson:
             print("Generating GeoJSON...")
-            create_geojson(parsed, args.geojson_output)
+            pdf_compiled_at = extract_pdf_compiled_at(PDF_FILE)
+            if pdf_compiled_at:
+                print(f"PDF compiled at: {pdf_compiled_at}")
+            else:
+                print("Warning: could not find compiled date on PDF cover page")
+            create_geojson(parsed, args.geojson_output, pdf_compiled_at=pdf_compiled_at)
 
         # 5. Optional distance filter
         center_lat = center_lon = None
