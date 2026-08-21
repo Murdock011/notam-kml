@@ -21,13 +21,10 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install "pypdf>=4.0" "simplekml>=1.3.6"
+          pip install -r requirements.txt
           python -c "import pypdf, simplekml; print('pypdf', pypdf.__version__); print('simplekml', simplekml.__version__)"
-    
+
       - name: Run the script
-        env:
-          # Optional – only needed if you want to upload to Google Drive
-          GOOGLE_SERVICE_ACCOUNT: ${{ secrets.GOOGLE_SERVICE_ACCOUNT }}
         run: |
           python notam_to_kml.py
 
