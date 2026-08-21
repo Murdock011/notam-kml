@@ -32,6 +32,12 @@
     font-size: 11px; font-weight: 700; border: 2px solid #fff;
     box-shadow: 0 1px 3px rgba(0,0,0,0.5);
   }
+  .centre-badge {
+    background: #2f9e44; color: #fff; border-radius: 4px;
+    padding: 2px 6px; white-space: nowrap;
+    font-size: 11px; font-weight: 700; border: 2px solid #fff;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.5);
+  }
   .legend {
     position: absolute; bottom: 16px; right: 16px; z-index: 500;
     background: #fff; padding: 8px 10px; border-radius: 6px; font-size: 12px;
@@ -46,8 +52,9 @@
 
 <div id="controls">
   <h1>SA NOTAM Map</h1>
-  <label for="icao">Centre</label>
-  <select id="icao"><option value="">All NOTAMs (no filter)</option></select>
+  <label for="icaoInput">Centre(s)</label>
+  <input id="icaoInput" type="text" placeholder="e.g. FASD, FACT, FALA" list="airportList" style="width: 220px;">
+  <datalist id="airportList"></datalist>
   <label for="radius">Radius (NM)</label>
   <input id="radius" type="number" value="50" min="1" max="2000" step="1" style="width: 70px;">
   <button id="copyBtn">Copy visible NOTAMs</button>
@@ -158,19 +165,48 @@ function drawFeature(displayIndex, f) {
   }
 }
 
+// Splits free-typed text like "FASD, FACT  FALA" into a deduped list of
+// uppercase ICAO-shaped tokens.
+function parseIcaoTokens(raw) {
+  return Array.from(new Set(
+    (raw || '').split(/[,;\s]+/).map(s => s.trim().toUpperCase()).filter(Boolean)
+  ));
+}
+
+function drawCentre(centre, radiusNm) {
+  L.marker([centre.lat, centre.lon], {
+    icon: L.divIcon({
+      className: '',
+      html: `<div class="centre-badge">${centre.icao}</div>`,
+      iconSize: [0, 0],
+      iconAnchor: [-8, 8],
+    }),
+  }).addTo(layerGroup);
+  L.circle([centre.lat, centre.lon], {
+    radius: radiusNm * NM_TO_M,
+    color: '#2f9e44', weight: 2, dashArray: '4 4', fillColor: '#2f9e44', fillOpacity: 0.05,
+  }).addTo(layerGroup);
+}
+
+function currentTokens() {
+  return parseIcaoTokens(document.getElementById('icaoInput').value);
+}
+
 function applyFilter() {
-  const icao = document.getElementById('icao').value;
+  const tokens = currentTokens();
   const radius = parseFloat(document.getElementById('radius').value) || 0;
+  const centres = tokens.filter(t => airports[t]).map(t => ({ icao: t, ...airports[t] }));
+  const unknown = tokens.filter(t => !airports[t]);
   layerGroup.clearLayers();
 
   let shown = allFeatures;
-  if (icao && airports[icao]) {
-    const { lat: clat, lon: clon } = airports[icao];
+  if (tokens.length > 0) {
     shown = allFeatures.filter(f => {
       const props = f.properties;
-      if ((props.location || '').toUpperCase().includes(icao)) return true;
+      const loc = (props.location || '').toUpperCase();
+      if (tokens.some(t => loc.includes(t))) return true;
       if (props.centre_lat == null || props.centre_lon == null) return false;
-      return haversineNm(clat, clon, props.centre_lat, props.centre_lon) <= radius;
+      return centres.some(c => haversineNm(c.lat, c.lon, props.centre_lat, props.centre_lon) <= radius);
     });
   }
 
@@ -180,9 +216,11 @@ function applyFilter() {
 
   currentVisible = shown.map((f, i) => ({ index: i + 1, feature: f }));
   shown.forEach((f, i) => drawFeature(i + 1, f));
+  centres.forEach(c => drawCentre(c, radius));
 
-  document.getElementById('status').textContent =
-    `${shown.length} of ${allFeatures.length} NOTAMs shown`;
+  let statusText = `${shown.length} of ${allFeatures.length} NOTAMs shown`;
+  if (unknown.length > 0) statusText += ` (unknown ICAO: ${unknown.join(', ')})`;
+  document.getElementById('status').textContent = statusText;
 }
 
 function buildCopyTable() {
@@ -258,7 +296,7 @@ function buildKml(rows) {
   const parts = [
     '<?xml version="1.0" encoding="UTF-8"?>',
     '<kml xmlns="http://www.opengis.net/kml/2.2"><Document>',
-    `<name>${kmlEscape(document.getElementById('icao').value || 'All NOTAMs')}</name>`,
+    `<name>${kmlEscape(currentTokens().join(', ') || 'All NOTAMs')}</name>`,
     '<Style id="redPoint"><IconStyle><scale>1.1</scale><Icon><href>http://maps.google.com/mapfiles/kml/paddle/red-circle.png</href></Icon></IconStyle></Style>',
     '<Style id="bluePoint"><IconStyle><scale>1.1</scale><Icon><href>http://maps.google.com/mapfiles/kml/paddle/blu-circle.png</href></Icon></IconStyle></Style>',
     '<Style id="redPoly"><LineStyle><color>ff0000ff</color><width>2</width></LineStyle><PolyStyle><color>5a0000ff</color></PolyStyle></Style>',
@@ -318,10 +356,11 @@ function downloadKml() {
   const kml = buildKml(currentVisible);
   const blob = new Blob([kml], { type: 'application/vnd.google-earth.kml+xml' });
   const url = URL.createObjectURL(blob);
-  const icao = document.getElementById('icao').value || 'all';
+  const tokens = currentTokens();
+  const label = tokens.length > 0 ? tokens.join('_') : 'all';
   const a = document.createElement('a');
   a.href = url;
-  a.download = `notams_${icao.toLowerCase()}.kml`;
+  a.download = `notams_${label.toLowerCase()}.kml`;
   document.body.appendChild(a);
   a.click();
   a.remove();
@@ -336,7 +375,7 @@ async function loadAirports() {
   const res = await fetch('airports.csv', { cache: 'no-store' });
   const text = await res.text();
   const lines = text.trim().split('\n').slice(1); // skip header
-  const select = document.getElementById('icao');
+  const datalist = document.getElementById('airportList');
   const rows = lines.map(parseCsvLine)
     .map(([icao, lat, lon, ...nameParts]) => ({
       icao, lat: parseFloat(lat), lon: parseFloat(lon), name: nameParts.join(',').trim(),
@@ -346,8 +385,8 @@ async function loadAirports() {
     airports[r.icao] = { lat: r.lat, lon: r.lon };
     const opt = document.createElement('option');
     opt.value = r.icao;
-    opt.textContent = `${r.icao} — ${r.name}`;
-    select.appendChild(opt);
+    opt.label = `${r.icao} — ${r.name}`;
+    datalist.appendChild(opt);
   }
 }
 
@@ -363,8 +402,9 @@ async function loadNotams() {
 
 async function init() {
   await Promise.all([loadAirports(), loadNotams()]);
-  document.getElementById('icao').value = 'FASD';
-  document.getElementById('icao').addEventListener('change', applyFilter);
+  document.getElementById('icaoInput').value = 'FASD';
+  document.getElementById('icaoInput').addEventListener('input', applyFilter);
+  document.getElementById('icaoInput').addEventListener('change', applyFilter);
   document.getElementById('radius').addEventListener('change', applyFilter);
   document.getElementById('radius').addEventListener('input', applyFilter);
   document.getElementById('copyBtn').addEventListener('click', copyVisible);
