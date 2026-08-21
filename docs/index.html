@@ -20,7 +20,18 @@
     font-size: 13px; padding: 4px 6px; border-radius: 4px; border: 1px solid #445;
     background: #24304a; color: #fff;
   }
+  #controls button {
+    font-size: 13px; padding: 5px 10px; border-radius: 4px; border: 1px solid #445;
+    background: #2f6f4f; color: #fff; cursor: pointer;
+  }
+  #controls button:hover { background: #37835d; }
   #status { font-size: 12px; opacity: 0.7; margin-left: auto; white-space: nowrap; }
+  .notam-badge {
+    background: #3182ce; color: #fff; border-radius: 50%;
+    width: 22px; height: 22px; display: flex; align-items: center; justify-content: center;
+    font-size: 11px; font-weight: 700; border: 2px solid #fff;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.5);
+  }
   .legend {
     position: absolute; bottom: 16px; right: 16px; z-index: 500;
     background: #fff; padding: 8px 10px; border-radius: 6px; font-size: 12px;
@@ -39,6 +50,7 @@
   <select id="icao"><option value="">All NOTAMs (no filter)</option></select>
   <label for="radius">Radius (NM)</label>
   <input id="radius" type="number" value="50" min="1" max="2000" step="1" style="width: 70px;">
+  <button id="copyBtn">Copy visible NOTAMs</button>
   <span id="status">Loading…</span>
 </div>
 
@@ -64,11 +76,26 @@ L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
 let layerGroup = L.layerGroup().addTo(map);
 let allFeatures = [];
 let airports = {}; // icao -> {lat, lon, name}
+let currentVisible = []; // [{index, props}], ordered by end date, matches map badges
 
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
   }[c]));
+}
+
+// valid_from/valid_to are raw NOTAM B)/C) strings, usually YYMMDDHHMM.
+// Sort key: real 10-digit dates sort naturally; anything else (PERM, EST, ...)
+// has no fixed end, so it sorts after all dated NOTAMs.
+function endDateSortKey(validTo) {
+  return /^\d{10}$/.test(validTo || '') ? validTo : '9'.repeat(10);
+}
+
+function formatDateTime(raw) {
+  const m = /^(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})$/.exec(raw || '');
+  if (!m) return raw || '';
+  const [, yy, mo, dd, hh, mi] = m;
+  return `20${yy}-${mo}-${dd} ${hh}:${mi}`;
 }
 
 function haversineNm(lat1, lon1, lat2, lon2) {
@@ -80,44 +107,52 @@ function haversineNm(lat1, lon1, lat2, lon2) {
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
-function popupHtml(props) {
+function popupHtml(displayIndex, props) {
   const height = props.height_ft;
   const heightLine = height != null
     ? `Upper limit: ${height} ft (${props.is_low ? 'RED' : 'BLUE'})`
     : 'Upper limit: unknown (BLUE default)';
   return `
-    <div class="popup-title">#${props.index} (${escapeHtml(props.id)})</div>
+    <div class="popup-title">#${displayIndex} (${escapeHtml(props.id)})</div>
     Location: ${escapeHtml(props.location)}<br>
-    Valid: ${escapeHtml(props.valid_from)} &rarr; ${escapeHtml(props.valid_to)}<br>
+    Valid: ${escapeHtml(formatDateTime(props.valid_from))} &rarr; ${escapeHtml(formatDateTime(props.valid_to))}<br>
     ${heightLine}<br><br>
     <div class="popup-text">${escapeHtml(props.text)}</div>
   `;
 }
 
-function drawFeature(f) {
+function badgeIcon(displayIndex, color) {
+  return L.divIcon({
+    className: '',
+    html: `<div class="notam-badge" style="background:${color}">${displayIndex}</div>`,
+    iconSize: [22, 22],
+    iconAnchor: [11, 11],
+  });
+}
+
+function drawFeature(displayIndex, f) {
   const props = f.properties;
   const color = props.is_low ? RED : BLUE;
   const style = { color, weight: 2, fillColor: color, fillOpacity: 0.35 };
+  const popup = popupHtml(displayIndex, props);
 
   if (f.geometry.type === 'Polygon') {
     const layer = L.geoJSON(f, { style });
-    layer.bindPopup(popupHtml(props));
+    layer.bindPopup(popup);
     layer.addTo(layerGroup);
     if (props.centre_lat != null && props.centre_lon != null) {
-      L.circleMarker([props.centre_lat, props.centre_lon], {
-        radius: 4, color, fillColor: color, fillOpacity: 1, weight: 1,
-      }).bindPopup(popupHtml(props)).addTo(layerGroup);
+      L.marker([props.centre_lat, props.centre_lon], { icon: badgeIcon(displayIndex, color) })
+        .bindPopup(popup).addTo(layerGroup);
     }
   } else if (f.geometry.type === 'Point') {
     const [lon, lat] = f.geometry.coordinates;
-    L.circleMarker([lat, lon], {
-      radius: 6, color, fillColor: color, fillOpacity: 0.9, weight: 1,
-    }).bindPopup(popupHtml(props)).addTo(layerGroup);
+    L.marker([lat, lon], { icon: badgeIcon(displayIndex, color) })
+      .bindPopup(popup).addTo(layerGroup);
     if (props.radius_nm) {
       L.circle([lat, lon], {
         radius: props.radius_nm * NM_TO_M,
         color, weight: 2, fillColor: color, fillOpacity: 0.15,
-      }).bindPopup(popupHtml(props)).addTo(layerGroup);
+      }).bindPopup(popup).addTo(layerGroup);
     }
   }
 }
@@ -137,9 +172,46 @@ function applyFilter() {
       return haversineNm(clat, clon, props.centre_lat, props.centre_lon) <= radius;
     });
   }
-  shown.forEach(drawFeature);
+
+  // Order by end date (soonest-expiring first); open-ended (PERM/EST/...) last.
+  shown = [...shown].sort((a, b) =>
+    endDateSortKey(a.properties.valid_to).localeCompare(endDateSortKey(b.properties.valid_to)));
+
+  currentVisible = shown.map((f, i) => ({ index: i + 1, props: f.properties }));
+  shown.forEach((f, i) => drawFeature(i + 1, f));
+
   document.getElementById('status').textContent =
     `${shown.length} of ${allFeatures.length} NOTAMs shown`;
+}
+
+function buildCopyTable() {
+  const header = ['#', 'Location', 'NOTAM', 'Start', 'End', 'Condition'];
+  const rows = currentVisible.map(({ index, props }) => [
+    index,
+    props.location || '',
+    props.id || '',
+    formatDateTime(props.valid_from),
+    formatDateTime(props.valid_to),
+    (props.text || '').replace(/\s+/g, ' ').trim(),
+  ]);
+  return [header, ...rows].map(r => r.join('\t')).join('\n');
+}
+
+async function copyVisible() {
+  const btn = document.getElementById('copyBtn');
+  if (currentVisible.length === 0) {
+    btn.textContent = 'Nothing to copy';
+    setTimeout(() => { btn.textContent = 'Copy visible NOTAMs'; }, 1500);
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(buildCopyTable());
+    btn.textContent = `Copied ${currentVisible.length} NOTAMs!`;
+  } catch (err) {
+    btn.textContent = 'Copy failed';
+    console.error(err);
+  }
+  setTimeout(() => { btn.textContent = 'Copy visible NOTAMs'; }, 1500);
 }
 
 function parseCsvLine(line) {
@@ -181,6 +253,7 @@ async function init() {
   document.getElementById('icao').addEventListener('change', applyFilter);
   document.getElementById('radius').addEventListener('change', applyFilter);
   document.getElementById('radius').addEventListener('input', applyFilter);
+  document.getElementById('copyBtn').addEventListener('click', copyVisible);
   applyFilter();
 }
 
