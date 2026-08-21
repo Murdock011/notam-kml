@@ -51,6 +51,7 @@
   <label for="radius">Radius (NM)</label>
   <input id="radius" type="number" value="50" min="1" max="2000" step="1" style="width: 70px;">
   <button id="copyBtn">Copy visible NOTAMs</button>
+  <button id="downloadKmlBtn">Download KML</button>
   <span id="status">Loading…</span>
 </div>
 
@@ -76,7 +77,7 @@ L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
 let layerGroup = L.layerGroup().addTo(map);
 let allFeatures = [];
 let airports = {}; // icao -> {lat, lon, name}
-let currentVisible = []; // [{index, props}], ordered by end date, matches map badges
+let currentVisible = []; // [{index, feature}], ordered by end date, matches map badges
 
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c => ({
@@ -177,7 +178,7 @@ function applyFilter() {
   shown = [...shown].sort((a, b) =>
     endDateSortKey(a.properties.valid_to).localeCompare(endDateSortKey(b.properties.valid_to)));
 
-  currentVisible = shown.map((f, i) => ({ index: i + 1, props: f.properties }));
+  currentVisible = shown.map((f, i) => ({ index: i + 1, feature: f }));
   shown.forEach((f, i) => drawFeature(i + 1, f));
 
   document.getElementById('status').textContent =
@@ -186,14 +187,17 @@ function applyFilter() {
 
 function buildCopyTable() {
   const header = ['#', 'Location', 'NOTAM', 'Start', 'End', 'Condition'];
-  const rows = currentVisible.map(({ index, props }) => [
-    index,
-    props.location || '',
-    props.id || '',
-    formatDateTime(props.valid_from),
-    formatDateTime(props.valid_to),
-    (props.text || '').replace(/\s+/g, ' ').trim(),
-  ]);
+  const rows = currentVisible.map(({ index, feature }) => {
+    const props = feature.properties;
+    return [
+      index,
+      props.location || '',
+      props.id || '',
+      formatDateTime(props.valid_from),
+      formatDateTime(props.valid_to),
+      (props.text || '').replace(/\s+/g, ' ').trim(),
+    ];
+  });
   return [header, ...rows].map(r => r.join('\t')).join('\n');
 }
 
@@ -212,6 +216,116 @@ async function copyVisible() {
     console.error(err);
   }
   setTimeout(() => { btn.textContent = 'Copy visible NOTAMs'; }, 1500);
+}
+
+function kmlEscape(s) {
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+// Mirrors notam_to_kml.py's create_circle(): a lat/lon ring approximating
+// a radius_nm circle around (lat, lon).
+function circleCoords(lat, lon, radiusNm, points = 36) {
+  const radiusDeg = radiusNm / 60.0;
+  const coords = [];
+  for (let i = 0; i <= points; i++) {
+    const angle = 2 * Math.PI * i / points;
+    const dlat = radiusDeg * Math.cos(angle);
+    const dlon = radiusDeg * Math.sin(angle) / Math.max(Math.cos(lat * Math.PI / 180), 0.01);
+    coords.push([lon + dlon, lat + dlat]);
+  }
+  return coords;
+}
+
+function coordsToKml(lonLatPairs) {
+  return lonLatPairs.map(([lon, lat]) => `${lon},${lat},0`).join(' ');
+}
+
+function placemarkDescription(index, props) {
+  const height = props.height_ft;
+  const heightLine = height != null
+    ? `Upper limit: ${height} ft &rarr; ${props.is_low ? 'RED' : 'BLUE'}`
+    : 'Upper limit: unknown &rarr; BLUE (default)';
+  return `<b>#${index}</b> (${kmlEscape(props.id)})<br>` +
+    `Location: ${kmlEscape(props.location)}<br>` +
+    `Valid: ${kmlEscape(formatDateTime(props.valid_from))} &rarr; ${kmlEscape(formatDateTime(props.valid_to))}` +
+    `<br>${heightLine}<br><br><pre>${kmlEscape(props.text)}</pre>`;
+}
+
+// Builds a KML matching notam_to_kml.py's create_kml(): one Placemark per
+// polygon/point (plus a centroid point for polygons, or a radius circle for
+// points with a Q)-line radius), red/blue styled by height.
+function buildKml(rows) {
+  const parts = [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    '<kml xmlns="http://www.opengis.net/kml/2.2"><Document>',
+    `<name>${kmlEscape(document.getElementById('icao').value || 'All NOTAMs')}</name>`,
+    '<Style id="redPoint"><IconStyle><scale>1.1</scale><Icon><href>http://maps.google.com/mapfiles/kml/paddle/red-circle.png</href></Icon></IconStyle></Style>',
+    '<Style id="bluePoint"><IconStyle><scale>1.1</scale><Icon><href>http://maps.google.com/mapfiles/kml/paddle/blu-circle.png</href></Icon></IconStyle></Style>',
+    '<Style id="redPoly"><LineStyle><color>ff0000ff</color><width>2</width></LineStyle><PolyStyle><color>5a0000ff</color></PolyStyle></Style>',
+    '<Style id="bluePoly"><LineStyle><color>ffff0000</color><width>2</width></LineStyle><PolyStyle><color>5aff0000</color></PolyStyle></Style>',
+  ];
+
+  for (const { index, feature } of rows) {
+    const props = feature.properties;
+    const pointStyle = props.is_low ? '#redPoint' : '#bluePoint';
+    const polyStyle = props.is_low ? '#redPoly' : '#bluePoly';
+    const desc = placemarkDescription(index, props);
+
+    parts.push(`<Folder><name>${index}</name>`);
+    if (feature.geometry.type === 'Polygon') {
+      const ring = feature.geometry.coordinates[0];
+      parts.push(
+        `<Placemark><name>${index}</name><description><![CDATA[${desc}]]></description>` +
+        `<styleUrl>${polyStyle}</styleUrl><Polygon><outerBoundaryIs><LinearRing>` +
+        `<coordinates>${coordsToKml(ring)}</coordinates></LinearRing></outerBoundaryIs></Polygon></Placemark>`
+      );
+      if (props.centre_lat != null && props.centre_lon != null) {
+        parts.push(
+          `<Placemark><name>${index}</name><description><![CDATA[${desc}]]></description>` +
+          `<styleUrl>${pointStyle}</styleUrl><Point><coordinates>${props.centre_lon},${props.centre_lat},0</coordinates></Point></Placemark>`
+        );
+      }
+    } else if (feature.geometry.type === 'Point') {
+      const [lon, lat] = feature.geometry.coordinates;
+      parts.push(
+        `<Placemark><name>${index}</name><description><![CDATA[${desc}]]></description>` +
+        `<styleUrl>${pointStyle}</styleUrl><Point><coordinates>${lon},${lat},0</coordinates></Point></Placemark>`
+      );
+      if (props.radius_nm) {
+        const ring = circleCoords(lat, lon, props.radius_nm);
+        const descWithRadius = `${desc}<br>Radius: ${props.radius_nm} NM`;
+        parts.push(
+          `<Placemark><name>${index}</name><description><![CDATA[${descWithRadius}]]></description>` +
+          `<styleUrl>${polyStyle}</styleUrl><Polygon><outerBoundaryIs><LinearRing>` +
+          `<coordinates>${coordsToKml(ring)}</coordinates></LinearRing></outerBoundaryIs></Polygon></Placemark>`
+        );
+      }
+    }
+    parts.push('</Folder>');
+  }
+
+  parts.push('</Document></kml>');
+  return parts.join('\n');
+}
+
+function downloadKml() {
+  const btn = document.getElementById('downloadKmlBtn');
+  if (currentVisible.length === 0) {
+    btn.textContent = 'Nothing to download';
+    setTimeout(() => { btn.textContent = 'Download KML'; }, 1500);
+    return;
+  }
+  const kml = buildKml(currentVisible);
+  const blob = new Blob([kml], { type: 'application/vnd.google-earth.kml+xml' });
+  const url = URL.createObjectURL(blob);
+  const icao = document.getElementById('icao').value || 'all';
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `notams_${icao.toLowerCase()}.kml`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
 }
 
 function parseCsvLine(line) {
@@ -254,6 +368,7 @@ async function init() {
   document.getElementById('radius').addEventListener('change', applyFilter);
   document.getElementById('radius').addEventListener('input', applyFilter);
   document.getElementById('copyBtn').addEventListener('click', copyVisible);
+  document.getElementById('downloadKmlBtn').addEventListener('click', downloadKml);
   applyFilter();
 }
 
