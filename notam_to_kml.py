@@ -10,9 +10,11 @@ NOTAM → KML generator for South Africa
   - Colour by G) height (<1000 ft = red, ≥1000 ft = blue)
 """
 import csv
+import json
 import re
 import math
 import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Tuple, Optional, Dict
 try:
@@ -430,6 +432,62 @@ def create_kml(
     print(f"KML written to: {output_path}")
     print(f"Total NOTAMs: {len(notams)}")
 # ------------------------------------------------------------------
+# GeoJSON generation (for the static web map)
+# ------------------------------------------------------------------
+def notam_geojson_feature(n: Dict, idx: int) -> Optional[Dict]:
+    height = n.get("height_ft")
+    is_low = height is not None and height < 1000
+    centre = notam_center(n)
+    props = {
+        "index": idx,
+        "id": n["id"],
+        "location": n["location"],
+        "valid_from": n["valid_from"],
+        "valid_to": n["valid_to"],
+        "height_ft": height,
+        "is_low": is_low,
+        "text": n["text"],
+        "centre_lat": centre[0] if centre else None,
+        "centre_lon": centre[1] if centre else None,
+        "radius_nm": None,
+    }
+    if n.get("has_polygon") and n.get("polygon_coords"):
+        closed = close_polygon(n["polygon_coords"])
+        geometry = {"type": "Polygon", "coordinates": [[[lon, lat] for lon, lat in closed]]}
+        return {"type": "Feature", "properties": props, "geometry": geometry}
+
+    single_point = n.get("single_point")
+    q_geo = n.get("q_geo")
+    if single_point:
+        pin = single_point
+    elif q_geo:
+        pin = (q_geo["lon"], q_geo["lat"])
+    else:
+        return None
+    if q_geo and q_geo.get("radius_nm"):
+        props["radius_nm"] = q_geo["radius_nm"]
+    geometry = {"type": "Point", "coordinates": [pin[0], pin[1]]}
+    return {"type": "Feature", "properties": props, "geometry": geometry}
+
+
+def create_geojson(notams: List[Dict], output_path: str) -> None:
+    """Write ALL parsed NOTAMs (unfiltered) as GeoJSON for the static web map,
+    which applies its own ICAO/radius filter client-side."""
+    features = []
+    for idx, n in enumerate(notams, start=1):
+        feature = notam_geojson_feature(n, idx)
+        if feature:
+            features.append(feature)
+    fc = {
+        "type": "FeatureCollection",
+        "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "features": features,
+    }
+    out = Path(output_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(fc), encoding="utf-8")
+    print(f"GeoJSON written to: {output_path} ({len(features)} features)")
+# ------------------------------------------------------------------
 # Main
 # ------------------------------------------------------------------
 def main():
@@ -455,6 +513,16 @@ def main():
         "--no-filter",
         action="store_true",
         help="Disable distance filter and include all NOTAMs",
+    )
+    parser.add_argument(
+        "--geojson-output",
+        default="docs/notams.geojson",
+        help="Path to write the unfiltered GeoJSON for the web map (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--no-geojson",
+        action="store_true",
+        help="Skip writing the GeoJSON file",
     )
     args = parser.parse_args()
 
@@ -499,7 +567,13 @@ def main():
             print("ERROR: No usable NOTAMs after parsing.")
             return
 
-        # 4. Optional distance filter
+        # 4. GeoJSON for the static web map (always unfiltered, so the
+        #    page can apply its own ICAO/radius filter client-side)
+        if not args.no_geojson:
+            print("Generating GeoJSON...")
+            create_geojson(parsed, args.geojson_output)
+
+        # 5. Optional distance filter
         center_lat = center_lon = None
         if filter_icao:
             if filter_icao not in AIRPORTS:
@@ -514,7 +588,7 @@ def main():
                 print("WARNING: No NOTAMs within the filter radius.")
                 # still write an empty-ish KML with just the centre circle
 
-        # 5. Generate KML
+        # 6. Generate KML
         print("Generating KML...")
         create_kml(
             parsed,
