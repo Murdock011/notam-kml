@@ -26,14 +26,8 @@ python notam_to_kml.py --no-filter   # include every NOTAM in the PDF
 
 Airport ICAO codes available for `--icao` are listed in
 [airports.csv](airports.csv) (`icao,lat,lon,name`) — all ~308 active South
-African aerodromes, sourced from [OurAirports](https://ourairports.com/). Add
-a row there to support a new filter centre — no code changes needed.
+African aerodromes, sourced from [OurAirports](https://ourairports.com/). 
 
-Every run also writes `docs/notams.geojson` — an **unfiltered** GeoJSON dump
-of every parsed NOTAM, plus `pdf_compiled_at` (the "Date/Time" stamp off the
-CAA PDF's cover page — when ATNS compiled the summary, not when this script
-ran). Used by the web map below. Pass `--no-geojson` to skip it, or
-`--geojson-output` to change the path.
 
 ## Web map
 
@@ -52,9 +46,7 @@ run used.
   (matching the table below) and plain colour dots, for when the numbering
   just adds clutter.
 - **Show Table** — opens an on-page results table (`#`, Location, Number,
-  Start/End Date UTC, Condition), styled after the FAA NOTAM Search results
-  view. Rows are ordered by end date (latest-expiring first) and colour-coded
-  the same as the map; clicking a row pans/zooms the map to that NOTAM and
+  Start/End Date UTC, Condition),clicking a row pans/zooms the map to that NOTAM and
   opens its popup.
 - **Download KML** — builds a KML client-side from exactly what's currently
   visible (same filter/route/sort as the table) and downloads it, matching
@@ -63,8 +55,7 @@ run used.
   compiled (`pdf_compiled_at`) and how many hours old that is, with a link to
   the source PDF, so you know if the data might be stale.
 
-To serve it for free via GitHub Pages: repo **Settings → Pages → Source**,
-select "Deploy from a branch", branch `main`, folder `/docs`. It'll be live at
+ It'll be live at
 `https://<user>.github.io/<repo>/`.
 
 To preview locally:
@@ -78,6 +69,6 @@ cd docs && python3 -m http.server 8000
 
 [.github/workflows/daily.yml](.github/workflows/daily.yml) runs the script daily at
 06:00 UTC via GitHub Actions, uploads `notams.kml` as a build artifact
-(7-day retention), and commits the refreshed `docs/notams.geojson` +
+(3-day retention), and commits the refreshed `docs/notams.geojson` +
 `docs/airports.csv` back to the repo so the web map stays current. It can
 also be triggered manually from the Actions tab.
