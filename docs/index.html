@@ -274,9 +274,9 @@ function applyFilter() {
     });
   }
 
-  // Order by end date (soonest-expiring first); open-ended (PERM/EST/...) last.
+  // Order by end date (latest-expiring first); open-ended (PERM/EST/...) first.
   shown = [...shown].sort((a, b) =>
-    endDateSortKey(a.properties.valid_to).localeCompare(endDateSortKey(b.properties.valid_to)));
+    endDateSortKey(b.properties.valid_to).localeCompare(endDateSortKey(a.properties.valid_to)));
 
   currentVisible = shown.map((f, i) => ({ index: i + 1, feature: f }));
   shown.forEach((f, i) => drawFeature(i + 1, f));
