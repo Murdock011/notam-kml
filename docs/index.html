@@ -56,6 +56,23 @@
   .legend span { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; }
   .popup-text { white-space: pre-wrap; font-size: 12px; max-height: 200px; overflow-y: auto; }
   .popup-title { font-weight: 600; margin-bottom: 4px; }
+  #tablePanel {
+    flex: 0 0 auto; max-height: 38vh; overflow: auto; display: none;
+    background: #fff; border-top: 2px solid #1a2332;
+  }
+  #tablePanel.show { display: block; }
+  #notamTable { width: 100%; border-collapse: collapse; font-size: 12.5px; color: #1a2332; }
+  #notamTable thead th {
+    position: sticky; top: 0; background: #1a2332; color: #fff; text-align: left;
+    padding: 7px 10px; font-weight: 600; white-space: nowrap;
+  }
+  #notamTable tbody td { padding: 7px 10px; border-bottom: 1px solid #e3e6ea; vertical-align: top; }
+  #notamTable tbody tr:hover { background: #eef3fb; cursor: pointer; }
+  #notamTable tbody tr:nth-child(even) { background: #f7f9fb; }
+  #notamTable tbody tr:nth-child(even):hover { background: #eef3fb; }
+  .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; }
+  .cond-cell { max-width: 480px; }
+  .empty-row td { text-align: center; padding: 16px; color: #888; }
 </style>
 </head>
 <body>
@@ -71,11 +88,26 @@
     <label><input type="radio" name="numbersToggle" id="numbersOn" value="on" checked> Numbers</label>
     <label><input type="radio" name="numbersToggle" id="numbersOff" value="off"> Plain</label>
   </div>
-  <button id="copyBtn">Copy visible NOTAMs</button>
+  <button id="toggleTableBtn">Show Table</button>
   <button id="downloadKmlBtn">Download KML</button>
   <span id="status">Loading…</span>
 </div>
 <div id="dataBanner"></div>
+<div id="tablePanel">
+  <table id="notamTable">
+    <thead>
+      <tr>
+        <th>#</th>
+        <th>Location</th>
+        <th>Number</th>
+        <th>Start Date UTC</th>
+        <th>End Date UTC</th>
+        <th>Condition</th>
+      </tr>
+    </thead>
+    <tbody id="notamTableBody"></tbody>
+  </table>
+</div>
 
 <div id="map"></div>
 <div class="legend">
@@ -103,6 +135,7 @@ let allFeatures = [];
 let airports = {}; // icao -> {lat, lon, name}
 let currentVisible = []; // [{index, feature}], ordered by end date, matches map badges
 let showNumbers = true;
+let markersByIndex = {}; // displayIndex -> [Leaflet layers], rebuilt each applyFilter
 
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c => ({
@@ -165,6 +198,11 @@ function pointMarker(lat, lon, displayIndex, color) {
   });
 }
 
+function trackMarker(displayIndex, layer) {
+  (markersByIndex[displayIndex] = markersByIndex[displayIndex] || []).push(layer);
+  return layer;
+}
+
 function drawFeature(displayIndex, f) {
   const props = f.properties;
   const color = props.is_low ? RED : BLUE;
@@ -175,13 +213,16 @@ function drawFeature(displayIndex, f) {
     const layer = L.geoJSON(f, { style });
     layer.bindPopup(popup);
     layer.addTo(layerGroup);
+    trackMarker(displayIndex, layer);
     if (props.centre_lat != null && props.centre_lon != null) {
-      pointMarker(props.centre_lat, props.centre_lon, displayIndex, color)
+      const marker = pointMarker(props.centre_lat, props.centre_lon, displayIndex, color)
         .bindPopup(popup).addTo(layerGroup);
+      trackMarker(displayIndex, marker);
     }
   } else if (f.geometry.type === 'Point') {
     const [lon, lat] = f.geometry.coordinates;
-    pointMarker(lat, lon, displayIndex, color).bindPopup(popup).addTo(layerGroup);
+    const marker = pointMarker(lat, lon, displayIndex, color).bindPopup(popup).addTo(layerGroup);
+    trackMarker(displayIndex, marker);
     if (props.radius_nm) {
       L.circle([lat, lon], {
         radius: props.radius_nm * NM_TO_M,
@@ -256,6 +297,7 @@ function applyFilter() {
   const centres = tokens.filter(t => airports[t]).map(t => ({ icao: t, ...airports[t] }));
   const unknown = tokens.filter(t => !airports[t]);
   layerGroup.clearLayers();
+  markersByIndex = {};
 
   let shown = allFeatures;
   if (tokens.length > 0) {
@@ -297,39 +339,56 @@ function applyFilter() {
   }
   if (unknown.length > 0) statusText += ` (unknown ICAO: ${unknown.join(', ')})`;
   document.getElementById('status').textContent = statusText;
+  renderNotamTable();
 }
 
-function buildCopyTable() {
-  const header = ['#', 'Location', 'NOTAM', 'Start', 'End', 'Condition'];
-  const rows = currentVisible.map(({ index, feature }) => {
-    const props = feature.properties;
-    return [
-      index,
-      props.location || '',
-      props.id || '',
-      formatDateTime(props.valid_from),
-      formatDateTime(props.valid_to),
-      (props.text || '').replace(/\s+/g, ' ').trim(),
-    ];
-  });
-  return [header, ...rows].map(r => r.join('\t')).join('\n');
+function flyToFeature(displayIndex, feature) {
+  const props = feature.properties;
+  if (props.centre_lat != null && props.centre_lon != null) {
+    map.setView([props.centre_lat, props.centre_lon], Math.max(map.getZoom(), 9));
+  }
+  const layers = markersByIndex[displayIndex] || [];
+  // Prefer an actual point marker (has a fixed anchor) over the polygon
+  // outline layer, whose group-level openPopup() needs an explicit latlng.
+  const marker = layers.find(l => typeof l.getLatLng === 'function');
+  if (marker) marker.openPopup();
 }
 
-async function copyVisible() {
-  const btn = document.getElementById('copyBtn');
+function renderNotamTable() {
+  const tbody = document.getElementById('notamTableBody');
+  tbody.innerHTML = '';
+
   if (currentVisible.length === 0) {
-    btn.textContent = 'Nothing to copy';
-    setTimeout(() => { btn.textContent = 'Copy visible NOTAMs'; }, 1500);
+    const tr = document.createElement('tr');
+    tr.className = 'empty-row';
+    tr.innerHTML = '<td colspan="6">No NOTAMs match the current filter</td>';
+    tbody.appendChild(tr);
     return;
   }
-  try {
-    await navigator.clipboard.writeText(buildCopyTable());
-    btn.textContent = `Copied ${currentVisible.length} NOTAMs!`;
-  } catch (err) {
-    btn.textContent = 'Copy failed';
-    console.error(err);
+
+  for (const { index, feature } of currentVisible) {
+    const props = feature.properties;
+    const color = props.is_low ? RED : BLUE;
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td><span class="dot" style="background:${color}"></span> ${index}</td>
+      <td>${escapeHtml(props.location || '')}</td>
+      <td>${escapeHtml(props.id || '')}</td>
+      <td>${escapeHtml(formatDateTime(props.valid_from))}</td>
+      <td>${escapeHtml(formatDateTime(props.valid_to))}</td>
+      <td class="cond-cell">${escapeHtml((props.text || '').replace(/\s+/g, ' ').trim())}</td>
+    `;
+    tr.addEventListener('click', () => flyToFeature(index, feature));
+    tbody.appendChild(tr);
   }
-  setTimeout(() => { btn.textContent = 'Copy visible NOTAMs'; }, 1500);
+}
+
+function toggleTable() {
+  const panel = document.getElementById('tablePanel');
+  const btn = document.getElementById('toggleTableBtn');
+  const show = !panel.classList.contains('show');
+  panel.classList.toggle('show', show);
+  btn.textContent = show ? 'Hide Table' : 'Show Table';
 }
 
 function kmlEscape(s) {
@@ -506,7 +565,7 @@ async function init() {
   document.getElementById('radius').addEventListener('input', applyFilter);
   document.getElementById('numbersOn').addEventListener('change', () => setShowNumbers(true));
   document.getElementById('numbersOff').addEventListener('change', () => setShowNumbers(false));
-  document.getElementById('copyBtn').addEventListener('click', copyVisible);
+  document.getElementById('toggleTableBtn').addEventListener('click', toggleTable);
   document.getElementById('downloadKmlBtn').addEventListener('click', downloadKml);
   applyFilter();
 }
