@@ -34,6 +34,8 @@
     display: none; box-sizing: border-box;
   }
   #dataBanner.show { display: block; }
+  #dataBanner a { color: #ffd98e; text-decoration: underline; }
+  #dataBanner a:hover { color: #fff; }
   .notam-badge {
     background: #3182ce; color: #fff; border-radius: 50%;
     width: 22px; height: 22px; display: flex; align-items: center; justify-content: center;
@@ -87,6 +89,8 @@
 const RED = "#e63946";
 const BLUE = "#3182ce";
 const NM_TO_M = 1852;
+// Matches PDF_URL in notam_to_kml.py — the CAA source document this map is built from.
+const SOURCE_PDF_URL = "https://caasanwebsitestorage.blob.core.windows.net/notam-summaries-and-pib/SUMMARY.pdf";
 
 const map = L.map('map').setView([-29.0, 24.0], 5); // South Africa
 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
@@ -472,16 +476,17 @@ async function loadNotams() {
   }
 
   const banner = document.getElementById('dataBanner');
+  const sourceLink = `<a href="${SOURCE_PDF_URL}" target="_blank" rel="noopener">source PDF</a>`;
   if (fc.pdf_compiled_at) {
     const compiled = new Date(fc.pdf_compiled_at);
     const ageHours = (Date.now() - compiled.getTime()) / 3600000;
     const ageNote = ageHours >= 1 ? ` (${ageHours.toFixed(1)} h ago)` : '';
-    banner.textContent =
+    banner.innerHTML =
       `⚠ Source NOTAM summary compiled by ATNS: ${compiled.toISOString().slice(0, 16).replace('T', ' ')} UTC${ageNote} — ` +
-      `NOTAMs issued after this time won't be reflected yet.`;
+      `NOTAMs issued after this time won't be reflected yet. (${sourceLink})`;
     banner.classList.add('show');
   } else {
-    banner.textContent = '⚠ Could not determine when the source NOTAM summary was compiled — treat this data\'s currency as unknown.';
+    banner.innerHTML = `⚠ Could not determine when the source NOTAM summary was compiled — treat this data's currency as unknown. (${sourceLink})`;
     banner.classList.add('show');
   }
 }
