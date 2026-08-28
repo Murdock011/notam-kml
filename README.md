@@ -16,8 +16,10 @@ pip install -r requirements.txt
 python notam_to_kml.py
 ```
 
-By default this filters to NOTAMs at FALW (Langebaanweg), 0 NM radius, and
-writes `notams.kml`. Options:
+By default this filters to NOTAMs within 50 NM of FASD (Saldanha/Vredenburg)
+and writes `notams.kml` (the [web map](#web-map) below defaults to FALW at
+0 NM instead — its filter is independent and set separately in
+`docs/index.html`). Options:
 
 ```bash
 python notam_to_kml.py --icao FACT --radius 100 --output cape_town.kml
@@ -26,8 +28,8 @@ python notam_to_kml.py --no-filter   # include every NOTAM in the PDF
 
 Airport ICAO codes available for `--icao` are listed in
 [airports.csv](airports.csv) (`icao,lat,lon,name`) — all ~308 active South
-African aerodromes, sourced from [OurAirports](https://ourairports.com/). 
-
+African aerodromes, sourced from [OurAirports](https://ourairports.com/). Add
+a row there to support a new filter centre — no code changes needed.
 
 ## Web map
 
@@ -46,8 +48,8 @@ run used.
   (matching the table below) and plain colour dots, for when the numbering
   just adds clutter.
 - **Show Table** — opens an on-page results table (`#`, Location, Number,
-  Start/End Date UTC, Condition),clicking a row pans/zooms the map to that NOTAM and
-  opens its popup.
+  Start/End Date UTC, Condition), colour-coded and ordered the same as the
+  map; clicking a row pans/zooms the map to that NOTAM and opens its popup.
 - **Download KML** — builds a KML client-side from exactly what's currently
   visible (same filter/route/sort as the table) and downloads it, matching
   the structure `notam_to_kml.py` produces server-side.
@@ -55,7 +57,8 @@ run used.
   compiled (`pdf_compiled_at`) and how many hours old that is, with a link to
   the source PDF, so you know if the data might be stale.
 
- It'll be live at
+To serve it for free via GitHub Pages: repo **Settings → Pages → Source**,
+select "Deploy from a branch", branch `main`, folder `/docs`. It'll be live at
 `https://<user>.github.io/<repo>/`.
 
 To preview locally:
@@ -68,7 +71,8 @@ cd docs && python3 -m http.server 8000
 ## Automation
 
 [.github/workflows/daily.yml](.github/workflows/daily.yml) runs the script daily at
-06:00 UTC via GitHub Actions, uploads `notams.kml` as a build artifact
-(3-day retention), and commits the refreshed `docs/notams.geojson` +
+06:17 UTC via GitHub Actions (deliberately off the round hour — see the
+comment in the workflow file), uploads `notams.kml` as a build artifact
+(7-day retention), and commits the refreshed `docs/notams.geojson` +
 `docs/airports.csv` back to the repo so the web map stays current. It can
 also be triggered manually from the Actions tab.
