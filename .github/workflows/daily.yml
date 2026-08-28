@@ -2,8 +2,12 @@ name: Daily NOTAM to KML
 
 on:
   schedule:
-    # Runs every day at 06:00 UTC (08:00 SAST)
-    - cron: '0 6 * * *'
+    # Runs daily at 06:17 UTC (08:17 SAST). Deliberately off the hour:
+    # GitHub's scheduler queues on-the-hour crons behind everyone else's
+    # on-the-hour crons, and on this repo that had grown into 11-12+ hour
+    # delays (see run history around 2026-08-27/28) instead of the usual
+    # sub-hour jitter. Keep this off :00/:15/:30/:45 if it drifts again.
+    - cron: '17 6 * * *'
   workflow_dispatch:   # Allows you to run it manually
 
 permissions:
